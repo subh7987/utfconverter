@@ -1,140 +1,102 @@
 import streamlit as st
 import os
+import shutil
 import json
 import chardet
-import shutil
 import pandas as pd
 import matplotlib.pyplot as plt
-from io import BytesIO
-from datetime import datetime
 
-# ========== CONFIG ==========
-st.set_page_config(page_title="UTF-8 Encoding Fixer", layout="wide")
-LOGO_PATH = "logo.ico"  # Replace with your own icon path if hosted
+st.set_page_config(page_title="UTF-8 JSON Validator", layout="centered")
+st.title("🤖 UTF-8 JSON Encoding Validator")
 
-# ========== SESSION STATE SETUP ==========
-if "log" not in st.session_state:
-    st.session_state.log = []
-if "report_df" not in st.session_state:
-    st.session_state.report_df = pd.DataFrame()
+st.markdown("""
+<style>
+.css-1aumxhk, .css-ffhzg2 { background-color: #0f172a !important; color: #e2e8f0 !important; }
+.stButton > button { background-color: #14b8a6; color: white; font-weight: bold; border-radius: 8px; }
+</style>
+""", unsafe_allow_html=True)
 
-# ========== UTILS ==========
-def log(msg):
-    st.session_state.log.append(msg)
-    st.write(msg)
+input_folder = st.text_input("📂 Enter path to JSON folder:", "")
 
-def detect_encoding(file_path):
-    with open(file_path, 'rb') as f:
-        raw_data = f.read()
-    result = chardet.detect(raw_data)
+report_data = []
+corrected_folder = "corrected_json"
+os.makedirs(corrected_folder, exist_ok=True)
+
+def detect_encoding(filepath):
+    with open(filepath, 'rb') as f:
+        result = chardet.detect(f.read())
     return result['encoding']
 
-def is_valid_utf8(file_path):
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            f.read()
-        return True
-    except:
-        return False
+def fix_encoding(filepath, output_path):
+    encoding = detect_encoding(filepath)
+    with open(filepath, 'r', encoding=encoding, errors='ignore') as f:
+        content = f.read()
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(content)
 
-def fix_encoding(file_path, output_path):
-    with open(file_path, 'rb') as f:
-        raw_data = f.read()
-    detected = chardet.detect(raw_data)
-    try:
-        text = raw_data.decode(detected['encoding'])
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(text)
-        return True
-    except:
-        return False
-
-def generate_excel_report(data):
-    output = BytesIO()
-    df = pd.DataFrame(data)
-    df.to_excel(output, index=False, engine='openpyxl')
-    output.seek(0)
-    return output
+def copy_file(filepath, output_path):
+    shutil.copy2(filepath, output_path)
 
 def generate_pie_chart(valid, fixed, failed):
+    valid = int(valid or 0)
+    fixed = int(fixed or 0)
+    failed = int(failed or 0)
+    total = valid + fixed + failed
+    if total == 0:
+        st.warning("⚠️ No files to display in pie chart.")
+        return
     fig, ax = plt.subplots()
     ax.pie([valid, fixed, failed], labels=["Valid", "Fixed", "Error"], autopct='%1.1f%%', startangle=140)
-    ax.axis('equal')
+    ax.axis("equal")
     st.pyplot(fig)
 
-# ========== MAIN PROCESS ==========
-def process_folder(folder):
-    corrected_dir = os.path.join(folder, "corrected_json")
-    os.makedirs(corrected_dir, exist_ok=True)
-
-    report = []
-    valid_count = 0
-    fixed_count = 0
-    failed_count = 0
-
+def process_files(folder):
+    valid = 0
+    fixed = 0
+    failed = 0
+    report_data.clear()
     for file in os.listdir(folder):
         if file.endswith(".json"):
-            file_path = os.path.join(folder, file)
-            out_path = os.path.join(corrected_dir, file)
-            encoding = detect_encoding(file_path)
+            full_path = os.path.join(folder, file)
+            output_path = os.path.join(corrected_folder, file)
+            try:
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    json.load(f)
+                copy_file(full_path, output_path)
+                status = "Valid"
+                valid += 1
+            except UnicodeDecodeError:
+                try:
+                    fix_encoding(full_path, output_path)
+                    status = "Fixed"
+                    fixed += 1
+                except Exception:
+                    status = "Error"
+                    failed += 1
+            except Exception:
+                status = "Error"
+                failed += 1
 
-            if encoding.lower() == 'utf-8' and is_valid_utf8(file_path):
-                shutil.copy(file_path, out_path)
-                report.append({"Filename": file, "Encoding": encoding, "Status": "Valid"})
-                valid_count += 1
-                log(f"✅ {file} is already UTF-8 valid.")
-            else:
-                if fix_encoding(file_path, out_path):
-                    report.append({"Filename": file, "Encoding": encoding, "Status": "Fixed"})
-                    fixed_count += 1
-                    log(f"🔧 {file} re-encoded to UTF-8.")
-                else:
-                    report.append({"Filename": file, "Encoding": encoding, "Status": "Error"})
-                    failed_count += 1
-                    log(f"❌ {file} failed to re-encode.")
+            report_data.append({"Filename": file, "Status": status})
+    return valid, fixed, failed
 
-    st.session_state.report_df = pd.DataFrame(report)
-    return valid_count, fixed_count, failed_count
+if st.button("🚀 Run Conversion"):
+    if input_folder.strip() == "":
+        st.error("❌ Please enter a valid folder path.")
+    elif not os.path.isdir(input_folder):
+        st.error("❌ The folder path doesn't exist.")
+    else:
+        with st.spinner("Processing files..."):
+            v, f, e = process_files(input_folder)
+        st.success(f"✅ Done! Valid: {v}, Fixed: {f}, Errors: {e}")
+        generate_pie_chart(v, f, e)
+        st.balloons()
+        st.subheader("📊 Summary Report")
+        df = pd.DataFrame(report_data)
+        st.dataframe(df, use_container_width=True)
 
-# ========== GUI ==========
-st.title("🤖 UTF-8 Encoding Fixer - Web App")
-st.markdown("""
-This app checks and fixes encoding of `.json` files to UTF-8. It generates a report and saves all checked files (fixed + valid) into a `corrected_json` folder.
-""")
+        report_excel = os.path.join(corrected_folder, "utf8_report.xlsx")
+        df.to_excel(report_excel, index=False)
 
-uploaded_folder = st.text_input("📂 Enter path to folder containing JSON files:")
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    if st.button("🚀 Run Conversion"):
-        if not uploaded_folder:
-            st.warning("Please provide a folder path.")
-        else:
-            with st.spinner("Processing files..."):
-                v, f, e = process_folder(uploaded_folder)
-                st.success("Done!")
-                st.metric("📁 Total JSON Files", v + f + e)
-                st.metric("🛠️ Fixed Files", f)
-                st.metric("❌ Failed Files", e)
-                generate_pie_chart(v, f, e)
-with col2:
-    if st.button("📤 Download Report"):
-        if not st.session_state.report_df.empty:
-            xls_data = generate_excel_report(st.session_state.report_df)
-            st.download_button(
-                label="Download Excel Report",
-                data=xls_data,
-                file_name=f"utf8_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.warning("No report to download yet.")
-with col3:
-    if st.button("🧹 Clear Log"):
-        st.session_state.log.clear()
-        st.session_state.report_df = pd.DataFrame()
-        st.experimental_rerun()
-
-st.subheader("📜 Log Output")
-for msg in st.session_state.log:
-    st.text(msg)
+        with open(report_excel, "rb") as file:
+            st.download_button(label="📥 Download Report (.xlsx)", data=file, file_name="utf8_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
