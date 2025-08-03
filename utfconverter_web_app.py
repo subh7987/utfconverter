@@ -1,102 +1,117 @@
 import streamlit as st
-import os
-import shutil
-import json
 import chardet
+import os
+import json
+import shutil
 import pandas as pd
 import matplotlib.pyplot as plt
+from io import BytesIO
+from zipfile import ZipFile
+from datetime import datetime
 
-st.set_page_config(page_title="UTF-8 JSON Validator", layout="centered")
-st.title("🤖 UTF-8 JSON Encoding Validator")
+# Setup folders
+OUTPUT_DIR = "corrected_json"
+REPORT_FILE = "report.xlsx"
+ZIP_NAME = "utf8_results.zip"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# UI Configuration
+st.set_page_config(page_title="UTF-8 JSON Fixer", layout="wide", page_icon="🤖")
 st.markdown("""
-<style>
-.css-1aumxhk, .css-ffhzg2 { background-color: #0f172a !important; color: #e2e8f0 !important; }
-.stButton > button { background-color: #14b8a6; color: white; font-weight: bold; border-radius: 8px; }
-</style>
+    <style>
+    .main { background-color: #0d1117; color: white; font-family: 'Courier New'; }
+    .stButton>button { background-color: #4CAF50; color: white; }
+    .stTextInput>div>input { background-color: #161b22; color: white; }
+    </style>
 """, unsafe_allow_html=True)
 
-input_folder = st.text_input("📂 Enter path to JSON folder:", "")
+st.title("🤖 UTF-8 JSON Encoding Fixer")
+st.markdown("Upload your `.json` files. The app will detect non-UTF-8 encoded files, fix them, and give you a downloadable report and ZIP of all files.")
 
-report_data = []
-corrected_folder = "corrected_json"
-os.makedirs(corrected_folder, exist_ok=True)
+# Upload files
+uploaded_files = st.file_uploader("Upload JSON Files", type=["json"], accept_multiple_files=True)
 
-def detect_encoding(filepath):
-    with open(filepath, 'rb') as f:
-        result = chardet.detect(f.read())
-    return result['encoding']
+# Clear output
+if st.button("🔄 Clear All"):
+    shutil.rmtree(OUTPUT_DIR, ignore_errors=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    st.experimental_rerun()
 
-def fix_encoding(filepath, output_path):
-    encoding = detect_encoding(filepath)
-    with open(filepath, 'r', encoding=encoding, errors='ignore') as f:
-        content = f.read()
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(content)
+# Process
+valid_count = 0
+fixed_count = 0
+error_count = 0
+report_rows = []
 
-def copy_file(filepath, output_path):
-    shutil.copy2(filepath, output_path)
+if uploaded_files:
+    with st.spinner("🔍 Checking and fixing encoding..."):
+        progress = st.progress(0)
+        for i, file in enumerate(uploaded_files):
+            filename = file.name
+            try:
+                raw_data = file.read()
+                detected = chardet.detect(raw_data)
+                encoding = detected['encoding']
+                confidence = detected['confidence']
 
-def generate_pie_chart(valid, fixed, failed):
-    valid = int(valid or 0)
-    fixed = int(fixed or 0)
-    failed = int(failed or 0)
-    total = valid + fixed + failed
-    if total == 0:
-        st.warning("⚠️ No files to display in pie chart.")
-        return
+                if encoding.lower() != 'utf-8':
+                    try:
+                        text = raw_data.decode(encoding)
+                        utf8_data = text.encode('utf-8')
+                        with open(os.path.join(OUTPUT_DIR, filename), 'wb') as out:
+                            out.write(utf8_data)
+                        fixed_count += 1
+                        report_rows.append([filename, encoding, confidence, "Fixed"])
+                    except Exception as e:
+                        error_count += 1
+                        report_rows.append([filename, encoding, confidence, f"Error: {e}"])
+                else:
+                    with open(os.path.join(OUTPUT_DIR, filename), 'wb') as out:
+                        out.write(raw_data)
+                    valid_count += 1
+                    report_rows.append([filename, encoding, confidence, "Valid"])
+            except Exception as e:
+                error_count += 1
+                report_rows.append([filename, "N/A", 0, f"Error: {e}"])
+            progress.progress((i + 1) / len(uploaded_files))
+
+    # Stats Boxes
+    col1, col2, col3 = st.columns(3)
+    col1.metric("📁 Total Uploaded", len(uploaded_files))
+    col2.metric("✅ Valid", valid_count)
+    col3.metric("🛠️ Fixed", fixed_count)
+
+    # Pie Chart
     fig, ax = plt.subplots()
-    ax.pie([valid, fixed, failed], labels=["Valid", "Fixed", "Error"], autopct='%1.1f%%', startangle=140)
-    ax.axis("equal")
+    ax.pie([valid_count, fixed_count, error_count], labels=["Valid", "Fixed", "Error"], autopct='%1.1f%%', startangle=140)
+    ax.axis('equal')
     st.pyplot(fig)
 
-def process_files(folder):
-    valid = 0
-    fixed = 0
-    failed = 0
-    report_data.clear()
-    for file in os.listdir(folder):
-        if file.endswith(".json"):
-            full_path = os.path.join(folder, file)
-            output_path = os.path.join(corrected_folder, file)
-            try:
-                with open(full_path, 'r', encoding='utf-8') as f:
-                    json.load(f)
-                copy_file(full_path, output_path)
-                status = "Valid"
-                valid += 1
-            except UnicodeDecodeError:
-                try:
-                    fix_encoding(full_path, output_path)
-                    status = "Fixed"
-                    fixed += 1
-                except Exception:
-                    status = "Error"
-                    failed += 1
-            except Exception:
-                status = "Error"
-                failed += 1
+    # Report Download
+    df_report = pd.DataFrame(report_rows, columns=["Filename", "Detected Encoding", "Confidence", "Status"])
+    report_path = os.path.join(OUTPUT_DIR, REPORT_FILE)
+    df_report.to_excel(report_path, index=False)
 
-            report_data.append({"Filename": file, "Status": status})
-    return valid, fixed, failed
+    with open(report_path, "rb") as xls_file:
+        st.download_button(
+            label="📄 Download Report (.xlsx)",
+            data=xls_file,
+            file_name=REPORT_FILE,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
-if st.button("🚀 Run Conversion"):
-    if input_folder.strip() == "":
-        st.error("❌ Please enter a valid folder path.")
-    elif not os.path.isdir(input_folder):
-        st.error("❌ The folder path doesn't exist.")
-    else:
-        with st.spinner("Processing files..."):
-            v, f, e = process_files(input_folder)
-        st.success(f"✅ Done! Valid: {v}, Fixed: {f}, Errors: {e}")
-        generate_pie_chart(v, f, e)
-        st.balloons()
-        st.subheader("📊 Summary Report")
-        df = pd.DataFrame(report_data)
-        st.dataframe(df, use_container_width=True)
+    # Zip Output
+    zip_buffer = BytesIO()
+    with ZipFile(zip_buffer, "w") as zipf:
+        for foldername, _, filenames in os.walk(OUTPUT_DIR):
+            for f in filenames:
+                full_path = os.path.join(foldername, f)
+                arcname = os.path.relpath(full_path, OUTPUT_DIR)
+                zipf.write(full_path, arcname)
 
-        report_excel = os.path.join(corrected_folder, "utf8_report.xlsx")
-        df.to_excel(report_excel, index=False)
-
-        with open(report_excel, "rb") as file:
-            st.download_button(label="📥 Download Report (.xlsx)", data=file, file_name="utf8_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        label="📦 Download All (ZIP)",
+        data=zip_buffer.getvalue(),
+        file_name=ZIP_NAME,
+        mime="application/zip"
+    )
