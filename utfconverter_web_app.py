@@ -1,118 +1,122 @@
 import streamlit as st
 import chardet
-import os
-import json
-import shutil
 import pandas as pd
-import matplotlib.pyplot as plt
-from io import BytesIO
-from zipfile import ZipFile
+import os
+import shutil
+import io
+import zipfile
 from datetime import datetime
+from matplotlib import pyplot as plt
+from matplotlib.backends.backend_agg import RendererAgg
+import threading
 
-# Setup folders
-OUTPUT_DIR = "corrected_json"
-REPORT_FILE = "report.xlsx"
-ZIP_NAME = "utf8_results.zip"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+lock = threading.Lock()
 
-# UI Configuration
-st.set_page_config(page_title="UTF-8 JSON Fixer", layout="wide", page_icon="🤖")
+st.set_page_config(page_title="UTF-8 JSON Encoding Fixer by Dhirthi.AI", layout="wide")
+st.title("🧠 UTF-8 JSON Encoding Fixer by Dhirthi.AI")
+
 st.markdown("""
-    <style>
-    .main { background-color: #0d1117; color: white; font-family: 'Courier New'; }
-    .stButton>button { background-color: #4CAF50; color: white; }
-    .stTextInput>div>input { background-color: #161b22; color: white; }
-    </style>
-""", unsafe_allow_html=True)
+Upload your `.json` or `.txt` files. The app will detect non-UTF-8 encoded files, fix them, and give you:
+- 📊 A downloadable summary report (.xlsx)
+- 📦 A ZIP of all fixed/skipped/error files
+""")
 
-st.title("🤖 UTF-8 JSON Encoding Fixer by Dhritii.AI")
-st.markdown("Upload your `.json` files. The app will detect non-UTF-8 encoded files, fix them, and give you a downloadable report and ZIP of all files.")
+uploaded_files = st.file_uploader("Upload JSON/TXT Files", type=["json", "txt"], accept_multiple_files=True)
 
-# Upload files
-uploaded_files = st.file_uploader("Upload JSON Files", type=["json"], accept_multiple_files=True)
+output_dir = "output"
+fixed_dir = os.path.join(output_dir, "fixed")
+skipped_dir = os.path.join(output_dir, "skipped")
+error_dir = os.path.join(output_dir, "error")
+report_path = os.path.join(output_dir, "report.xlsx")
+zip_path = os.path.join(output_dir, "utf8_fixed_output.zip")
 
-# Clear output
-if st.button("🔄 Clear All"):
-    shutil.rmtree(OUTPUT_DIR, ignore_errors=True)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    st.experimental_rerun()
+os.makedirs(fixed_dir, exist_ok=True)
+os.makedirs(skipped_dir, exist_ok=True)
+os.makedirs(error_dir, exist_ok=True)
 
-# Process
-valid_count = 0
-fixed_count = 0
-error_count = 0
-report_rows = []
+result_data = []
+log_placeholder = st.empty()
+log_output = ""
 
-if uploaded_files:
-    with st.spinner("🔍 Checking and fixing encoding..."):
-        progress = st.progress(0)
-        for i, file in enumerate(uploaded_files):
-            filename = file.name
-            try:
-                raw_data = file.read()
-                detected = chardet.detect(raw_data)
-                encoding = detected['encoding']
-                confidence = detected['confidence']
+def detect_encoding(raw_data):
+    result = chardet.detect(raw_data)
+    return result['encoding']
 
-                if encoding.lower() != 'utf-8':
-                    try:
-                        text = raw_data.decode(encoding)
-                        utf8_data = text.encode('utf-8')
-                        with open(os.path.join(OUTPUT_DIR, filename), 'wb') as out:
-                            out.write(utf8_data)
-                        fixed_count += 1
-                        report_rows.append([filename, encoding, confidence, "Fixed"])
-                    except Exception as e:
-                        error_count += 1
-                        report_rows.append([filename, encoding, confidence, f"Error: {e}"])
-                else:
-                    with open(os.path.join(OUTPUT_DIR, filename), 'wb') as out:
-                        out.write(raw_data)
-                    valid_count += 1
-                    report_rows.append([filename, encoding, confidence, "Valid"])
-            except Exception as e:
-                error_count += 1
-                report_rows.append([filename, "N/A", 0, f"Error: {e}"])
-            progress.progress((i + 1) / len(uploaded_files))
+def process_files():
+    global log_output
+    fixed_count = skipped_count = error_count = 0
 
-    # Stats Boxes
-    col1, col2, col3 = st.columns(3)
-    col1.metric("📁 Total Uploaded", len(uploaded_files))
-    col2.metric("✅ Valid", valid_count)
-    col3.metric("🛠️ Fixed", fixed_count)
+    for file in uploaded_files:
+        raw = file.read()
+        file_name = file.name
+        extension = os.path.splitext(file_name)[-1]
+        encoding = detect_encoding(raw)
+        try:
+            if encoding.lower() != 'utf-8':
+                decoded = raw.decode(encoding)
+                with open(os.path.join(fixed_dir, file_name), "w", encoding='utf-8') as f:
+                    f.write(decoded)
+                fixed_count += 1
+                result_data.append([file_name, encoding, "Fixed"])
+                log_output += f"✔️ Fixed: {file_name} (Detected: {encoding})\n"
+            else:
+                with open(os.path.join(skipped_dir, file_name), "wb") as f:
+                    f.write(raw)
+                skipped_count += 1
+                result_data.append([file_name, encoding, "Already UTF-8"])
+                log_output += f"✅ Already UTF-8: {file_name}\n"
+        except Exception as e:
+            with open(os.path.join(error_dir, file_name), "wb") as f:
+                f.write(raw)
+            error_count += 1
+            result_data.append([file_name, encoding or "Unknown", f"Error: {str(e)}"])
+            log_output += f"❌ Error: {file_name} — {str(e)}\n"
 
-    # Pie Chart
-    fig, ax = plt.subplots()
-    ax.pie([valid_count, fixed_count, error_count], labels=["Valid", "Fixed", "Error"], autopct='%1.1f%%', startangle=140)
-    ax.axis('equal')
-    st.pyplot(fig)
+        log_placeholder.code(log_output)
 
-    # Report Download
-    df_report = pd.DataFrame(report_rows, columns=["Filename", "Detected Encoding", "Confidence", "Status"])
-    report_path = os.path.join(OUTPUT_DIR, REPORT_FILE)
-    df_report.to_excel(report_path, index=False)
+    return fixed_count, skipped_count, error_count
 
-    with open(report_path, "rb") as xls_file:
-        st.download_button(
-            label="📄 Download Report (.xlsx)",
-            data=xls_file,
-            file_name=REPORT_FILE,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+def generate_report():
+    df = pd.DataFrame(result_data, columns=["File Name", "Detected Encoding", "Status"])
+    df.to_excel(report_path, index=False)
 
-    # Zip Output
-    zip_buffer = BytesIO()
-    with ZipFile(zip_buffer, "w") as zipf:
-        for foldername, _, filenames in os.walk(OUTPUT_DIR):
-            for f in filenames:
-                full_path = os.path.join(foldername, f)
-                arcname = os.path.relpath(full_path, OUTPUT_DIR)
-                zipf.write(full_path, arcname)
+def generate_zip():
+    with zipfile.ZipFile(zip_path, 'w') as zipf:
+        for folder in [fixed_dir, skipped_dir, error_dir]:
+            for root, _, files in os.walk(folder):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    zipf.write(file_path, arcname=os.path.relpath(file_path, output_dir))
 
-    st.download_button(
-        label="📦 Download All (ZIP)",
-        data=zip_buffer.getvalue(),
-        file_name=ZIP_NAME,
-        mime="application/zip"
-    )
+def generate_pie_chart(valid, fixed, errors):
+    with lock:
+        fig, ax = plt.subplots()
+        ax.pie([valid, fixed, errors], labels=["Already UTF-8", "Fixed", "Error"], autopct='%1.1f%%', startangle=140)
+        st.pyplot(fig)
 
+if st.button("🚀 Run Encoding Fixer"):
+    if not uploaded_files:
+        st.warning("Please upload at least one file.")
+    else:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        os.makedirs(fixed_dir)
+        os.makedirs(skipped_dir)
+        os.makedirs(error_dir)
+
+        valid, fixed, errors = process_files()
+        generate_report()
+        generate_zip()
+
+        st.success("✅ Encoding fix completed!")
+        st.markdown(f"**Total Files:** {len(uploaded_files)}")
+        st.markdown(f"**Already UTF-8:** {valid}")
+        st.markdown(f"**Fixed:** {fixed}")
+        st.markdown(f"**Errors:** {errors}")
+
+        generate_pie_chart(valid, fixed, errors)
+
+        with open(report_path, "rb") as f:
+            st.download_button("📥 Download Report (.xlsx)", f, file_name="utf8_encoding_report.xlsx")
+
+        with open(zip_path, "rb") as z:
+            st.download_button("📦 Download All Output (ZIP)", z, file_name="utf8_fixed_output.zip")
