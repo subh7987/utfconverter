@@ -25,7 +25,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🤖 UTF-8 JSON Encoding Fixer")
+st.title("🤖 UTF-8 JSON Encoding Fixer by Dhritii.AI")
 st.markdown("Upload your `.json` files. The app will detect non-UTF-8 encoded files, fix them, and give you a downloadable report and ZIP of all files.")
 
 # Upload files
@@ -115,3 +115,4 @@ if uploaded_files:
         file_name=ZIP_NAME,
         mime="application/zip"
     )
+
